@@ -8,6 +8,7 @@ import socket
 import faulthandler
 import aria2p
 import psycopg2
+import json
 import qbittorrentapi as qba
 import telegram.ext as tg
 
@@ -29,27 +30,48 @@ LOGGER = logging.getLogger(__name__)
 
 load_dotenv('config.env', override=True)
 
-SERVER_PORT = os.environ.get('SERVER_PORT', None)
+def getConfig(name: str):
+    return os.environ[name]
+
 try:
+    NETRC_URL = getConfig('NETRC_URL')
+    if len(NETRC_URL) == 0:
+        raise KeyError
+    try:
+        res = requests.get(NETRC_URL)
+        if res.status_code == 200:
+            with open('.netrc', 'wb+') as f:
+                f.write(res.content)
+                f.close()
+        else:
+            logging.error(f"Failed to download .netrc {res.status_code}")
+    except Exception as e:
+        logging.error(str(e))
+except KeyError:
+    pass
+try:
+    SERVER_PORT = getConfig('SERVER_PORT')
     if len(SERVER_PORT) == 0:
-        raise TypeError
-except TypeError:
+        raise KeyError
+except KeyError:
     SERVER_PORT = 80
+
 PORT = os.environ.get('PORT', SERVER_PORT)
 web = subprocess.Popen([f"gunicorn wserver:start_server --bind 0.0.0.0:{PORT} --worker-class aiohttp.GunicornWebWorker"], shell=True)
 alive = subprocess.Popen(["python3", "alive.py"])
 nox = subprocess.Popen(["qbittorrent-nox", "--profile=."])
+if not os.path.exists('.netrc'):
+    subprocess.run(["touch", ".netrc"])
+subprocess.run(["cp", ".netrc", "/root/.netrc"])
 subprocess.run(["chmod", "600", ".netrc"])
 subprocess.run(["chmod", "+x", "aria.sh"])
 subprocess.run(["./aria.sh"], shell=True)
 time.sleep(0.5)
+
 Interval = []
 DRIVES_NAMES = []
 DRIVES_IDS = []
 INDEX_URLS = []
-
-def getConfig(name: str):
-    return os.environ[name]
 
 def mktable():
     try:
@@ -90,6 +112,24 @@ trackerslist = "\n\n".join(trackerslist)
 get_client().application.set_preferences({"add_trackers":f"{trackerslist}"})
 """
 
+def aria2c_init():
+    try:
+        logging.info("Initializing Aria2c")
+        link = "https://releases.ubuntu.com/21.10/ubuntu-21.10-desktop-amd64.iso.torrent"
+        path = "/usr/src/app/"
+        aria2.add_uris([link], {'dir': path})
+        time.sleep(3)
+        downloads = aria2.get_downloads()
+        time.sleep(30)
+        for download in downloads:
+            aria2.remove([download], force=True, files=True)
+    except Exception as e:
+        logging.error(f"Aria2c initializing error: {e}")
+        pass
+
+if not os.path.isfile(".restartmsg"):
+    threading.Thread(target=aria2c_init).start()
+    time.sleep(1)
 
 DOWNLOAD_DIR = None
 BOT_TOKEN = None
@@ -316,6 +356,11 @@ try:
 except KeyError:
     BLOCK_MEGA_LINKS = False
 try:
+    WEB_PINCODE = getConfig('WEB_PINCODE')
+    WEB_PINCODE = WEB_PINCODE.lower() == 'true'
+except KeyError:
+    WEB_PINCODE = False
+try:
     SHORTENER = getConfig('SHORTENER')
     SHORTENER_API = getConfig('SHORTENER_API')
     if len(SHORTENER) == 0 or len(SHORTENER_API) == 0:
@@ -351,23 +396,38 @@ try:
 except KeyError:
     EQUAL_SPLITS = False
 try:
+    QB_SEED = getConfig('QB_SEED')
+    QB_SEED = QB_SEED.lower() == 'true'
+except KeyError:
+    QB_SEED = False
+try:
     CUSTOM_FILENAME = getConfig('CUSTOM_FILENAME')
     if len(CUSTOM_FILENAME) == 0:
         raise KeyError
 except KeyError:
     CUSTOM_FILENAME = None
 try:
+    PHPSESSID = getConfig('PHPSESSID')
+    CRYPT = getConfig('CRYPT')
+    if len(PHPSESSID) == 0 or len(CRYPT) == 0:
+        raise KeyError
+except KeyError:
+    PHPSESSID = None
+    CRYPT = None
+try:
     TOKEN_PICKLE_URL = getConfig('TOKEN_PICKLE_URL')
     if len(TOKEN_PICKLE_URL) == 0:
         raise KeyError
-    res = requests.get(TOKEN_PICKLE_URL)
-    if res.status_code == 200:
-        with open('token.pickle', 'wb+') as f:
-            f.write(res.content)
-            f.close()
-    else:
-        logging.error(f"Failed to download token.pickle {res.status_code}")
-        raise KeyError
+    try:
+        res = requests.get(TOKEN_PICKLE_URL)
+        if res.status_code == 200:
+            with open('token.pickle', 'wb+') as f:
+                f.write(res.content)
+                f.close()
+        else:
+            logging.error(f"Failed to download token.pickle, link got HTTP response: {res.status_code}")
+    except Exception as e:
+        logging.error(str(e))
 except KeyError:
     pass
 try:
@@ -375,13 +435,16 @@ try:
     if len(ACCOUNTS_ZIP_URL) == 0:
         raise KeyError
     else:
-        res = requests.get(ACCOUNTS_ZIP_URL)
-        if res.status_code == 200:
-            with open('accounts.zip', 'wb+') as f:
-                f.write(res.content)
-                f.close()
-        else:
-            logging.error(f"Failed to download accounts.zip {res.status_code}")
+        try:
+            res = requests.get(ACCOUNTS_ZIP_URL)
+            if res.status_code == 200:
+                with open('accounts.zip', 'wb+') as f:
+                    f.write(res.content)
+                    f.close()
+            else:
+                logging.error(f"Failed to download accounts.zip, link got HTTP response: {res.status_code}")
+        except Exception as e:
+            logging.error(str(e))
             raise KeyError
         subprocess.run(["unzip", "-q", "-o", "accounts.zip"])
         os.remove("accounts.zip")
@@ -391,14 +454,32 @@ try:
     MULTI_SEARCH_URL = getConfig('MULTI_SEARCH_URL')
     if len(MULTI_SEARCH_URL) == 0:
         raise KeyError
-    res = requests.get(MULTI_SEARCH_URL)
-    if res.status_code == 200:
-        with open('drive_folder', 'wb+') as f:
-            f.write(res.content)
-            f.close()
-    else:
-        logging.error(f"Failed to download drive_folder {res.status_code}")
+    try:
+        res = requests.get(MULTI_SEARCH_URL)
+        if res.status_code == 200:
+            with open('drive_folder', 'wb+') as f:
+                f.write(res.content)
+                f.close()
+        else:
+            logging.error(f"Failed to download drive_folder, link got HTTP response: {res.status_code}")
+    except Exception as e:
+        logging.error(str(e))
+except KeyError:
+    pass
+try:
+    YT_COOKIES_URL = getConfig('YT_COOKIES_URL')
+    if len(YT_COOKIES_URL) == 0:
         raise KeyError
+    try:
+        res = requests.get(YT_COOKIES_URL)
+        if res.status_code == 200:
+            with open('cookies.txt', 'wb+') as f:
+                f.write(res.content)
+                f.close()
+        else:
+            logging.error(f"Failed to download cookies.txt, link got HTTP response: {res.status_code}")
+    except Exception as e:
+        logging.error(str(e))
 except KeyError:
     pass
 
@@ -418,8 +499,21 @@ if os.path.exists('drive_folder'):
                 INDEX_URLS.append(temp[2])
             except IndexError as e:
                 INDEX_URLS.append(None)
+try:
+    SEARCH_PLUGINS = getConfig('SEARCH_PLUGINS')
+    if len(SEARCH_PLUGINS) == 0:
+        raise KeyError
+    SEARCH_PLUGINS = json.loads(SEARCH_PLUGINS)
+    qbclient = get_client()
+    qb_plugins = qbclient.search_plugins()
+    if qb_plugins:
+        for plugin in qb_plugins:
+            p = plugin['name']
+            qbclient.search_uninstall_plugin(names=p)
+    qbclient.search_install_plugin(SEARCH_PLUGINS)
+except KeyError:
+    SEARCH_PLUGINS = None
 
-
-updater = tg.Updater(token=BOT_TOKEN, request_kwargs={'read_timeout': 30, 'connect_timeout': 15})
+updater = tg.Updater(token=BOT_TOKEN)
 bot = updater.bot
 dispatcher = updater.dispatcher
